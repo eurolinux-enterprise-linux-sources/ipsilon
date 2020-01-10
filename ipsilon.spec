@@ -2,7 +2,7 @@
 
 Name:       ipsilon
 Version:    1.0.0
-Release:    12%{?builddate}%{?gittag}%{?dist}
+Release:    13%{?builddate}%{?gittag}%{?dist}
 Summary:    An Identity Provider Server
 
 Group:      System Environment/Base
@@ -22,6 +22,7 @@ Patch7:     ipsilon-db-keys.patch
 Patch8:     ipsilon-saml-patch-check.patch
 Patch9:     ipsilon-database-cleanup.patch
 Patch10:    ipsilon-cve-check-sp-deletion-permissions.patch
+Patch11:    ipsilon-cve-anonymous-logout.patch
 
 
 BuildRequires:  python2-devel
@@ -218,6 +219,7 @@ SSSD.
 %patch8 -p1
 %patch9 -p1
 %patch10 -p1
+%patch11 -p1
 
 
 %build
@@ -349,6 +351,9 @@ exit 0
 
 
 %changelog
+* Fri Nov 11 2016 Patrick Uiterwijk <puiterwijk@redhat.com> - 1.0.0-13
+- Backport patch for CVE-2016-8638 RHBZ#1394116
+
 * Wed Oct 14 2015 Patrick Uiterwijk <puiterwijk@redhat.com> - 1.0.0-12
 - Backport patch for CVE-2015-5301 RHBZ#1271666
 
