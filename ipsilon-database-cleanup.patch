@@ -1,0 +1,274 @@
+From 96de7bec50698751e440a3652b5c9a4b3a52ba9d Mon Sep 17 00:00:00 2001
+From: Patrick Uiterwijk <puiterwijk@redhat.com>
+Date: Fri, 11 Sep 2015 00:32:22 +0200
+Subject: [PATCH] Backport database cleanup patches Framework:
+ 1e985d549481a2ca0e03440e410912b4e2b49271 TranStore:
+ 2b17119bb97eba45030d18f590624c2b2a9f257e Sessions:
+ 24fa1f2acd9cb84342064ec59b311968353fd0ae OpenIDStore:
+ 11bbbe3ac6a0842599ab2e5110427758ebaa5573
+
+---
+ ipsilon/install/ipsilon-server-install |  7 ++-
+ ipsilon/providers/openid/store.py      | 11 +++++
+ ipsilon/providers/saml2idp.py          |  8 ----
+ ipsilon/util/data.py                   | 79 +++++++++++++++++++++++++++++++++-
+ ipsilon/util/sessions.py               |  9 ++++
+ templates/install/ipsilon.conf         |  1 +
+ 6 files changed, 104 insertions(+), 11 deletions(-)
+
+diff --git a/ipsilon/install/ipsilon-server-install b/ipsilon/install/ipsilon-server-install
+index 9aa5458..9fccb59 100755
+--- a/ipsilon/install/ipsilon-server-install
++++ b/ipsilon/install/ipsilon-server-install
+@@ -100,6 +100,7 @@ def install(plugins, args):
+                 'publicdatadir': args['public_data_dir'],
+                 'wellknowndir': args['wellknown_dir'],
+                 'sysuser': args['system_user'],
++                'cleanup_interval': args['cleanup_interval'],
+                 'ipsilondir': BINDIR,
+                 'staticdir': STATICDIR,
+                 'admindb': args['admin_dburi'] or args['database_url'] % {
+@@ -361,7 +362,11 @@ def parse_args(plugins):
+     parser.add_argument('--transaction-dburi',
+                         help='Transaction database URI (override template)')
+     parser.add_argument('--samlsessions-dburi',
+-                        help='SAML 2 sessions database URI (override template)')
++                        help='SAML 2 sessions database URI (override ' +
++                             'template)')
++    parser.add_argument('--cleanup-interval', default=30,
++                        help='Interval between cleaning up stale database ' +
++                             'entries (in minutes, default: 30 minutes)')
+ 
+     lms = []
+ 
+diff --git a/ipsilon/providers/openid/store.py b/ipsilon/providers/openid/store.py
+index 6443771..0815b1e 100644
+--- a/ipsilon/providers/openid/store.py
++++ b/ipsilon/providers/openid/store.py
+@@ -65,15 +65,26 @@ class OpenIDStore(Store, OpenIDStoreInterface):
+ 
+         return True
+ 
++    def _cleanup(self):
++        res1 = self.cleanupNonces()
++        res2 = self.cleanupAssociations()
++        return res1 + res2
++
+     def cleanupNonces(self):
+         nonces = self.get_unique_data('nonce')
++        cleaned = 0
+         for iden in nonces:
+             if nonces[iden]['timestamp'] < (time() - NonceSKEW):
++                cleaned += 1
+                 self.del_unique_data('nonce', iden)
++        return cleaned
+ 
+     def cleanupAssociations(self):
+         assocs = self.get_unique_data('association')
++        cleaned = 0
+         for iden in assocs:
+             if ((int(assocs[iden]['issued']) + int(assocs[iden]['lifetime']))
+                     < time()):
++                cleaned += 1
+                 self.del_unique_data('association', iden)
++        return cleaned
+diff --git a/ipsilon/providers/saml2idp.py b/ipsilon/providers/saml2idp.py
+index f771ef7..ad31d8f 100644
+--- a/ipsilon/providers/saml2idp.py
++++ b/ipsilon/providers/saml2idp.py
+@@ -286,14 +286,6 @@ Provides SAML 2.0 authentication infrastructure. """
+             logger.addHandler(lh)
+             logger.setLevel(logging.DEBUG)
+ 
+-        store = SAML2SessionStore(
+-            database_url=self.get_config_value('session database url')
+-        )
+-        bt = cherrypy.process.plugins.BackgroundTask(
+-            60, store.remove_expired_sessions
+-        )
+-        bt.start()
+-
+     @property
+     def allow_self_registration(self):
+         return self.get_config_value('allow self registration')
+diff --git a/ipsilon/util/data.py b/ipsilon/util/data.py
+index 737e597..7db090b 100644
+--- a/ipsilon/util/data.py
++++ b/ipsilon/util/data.py
+@@ -12,6 +12,7 @@ import ConfigParser
+ import os
+ import uuid
+ import logging
++import time
+ 
+ 
+ CURRENT_SCHEMA_VERSION = 2
+@@ -276,6 +277,13 @@ class FileQuery(Log):
+ 
+ 
+ class Store(Log):
++    # Static, Store-level variables
++    __cleanups = {}
++
++    # Static, class-level variables
++    # Either set this to False, or implement _cleanup, in child classes
++    _should_cleanup = True
++
+     def __init__(self, config_name=None, database_url=None):
+         if config_name is None and database_url is None:
+             raise ValueError('config_name or database_url must be provided')
+@@ -293,6 +301,60 @@ class Store(Log):
+             self._db = SqlStore.get_connection(name)
+             self._query = SqlQuery
+         self._upgrade_database()
++        if self._should_cleanup:
++            self._schedule_cleanup()
++
++    def _schedule_cleanup(self):
++        store_name = self.__class__.__name__
++        if self.is_readonly:
++            # No use in cleanups on a readonly database
++            self.debug('Not scheduling cleanup for %s due to readonly' %
++                       store_name)
++            return
++        if store_name in Store.__cleanups:
++            # This class was already scheduled, skip
++            return
++        self.debug('Scheduling cleanups for %s' % store_name)
++        # Check once every minute whether we need to clean
++        task = cherrypy.process.plugins.BackgroundTask(
++            60, self._maybe_run_cleanup)
++        task.start()
++        Store.__cleanups[store_name] = task
++
++    def _maybe_run_cleanup(self):
++        # Let's see if we need to do cleanup
++        last_clean = self.load_options('dbinfo').get('%s_last_clean' %
++                                                     self.__class__.__name__,
++                                                     {})
++        time_diff = cherrypy.config.get('cleanup_interval', 30) * 60
++        next_ts = int(time.time()) - time_diff
++        self.debug('Considering cleanup for %s: %s. Next at: %s'
++                   % (self.__class__.__name__, last_clean, next_ts))
++        if ('timestamp' not in last_clean or
++                int(last_clean['timestamp']) <= next_ts):
++            # First store the current time so that other servers don't start
++            self.save_options('dbinfo', '%s_last_clean'
++                              % self.__class__.__name__,
++                              {'timestamp': int(time.time()),
++                               'removed_entries': -1})
++
++            # Cleanup has been long enough ago, let's run
++            self.debug('Cleaning up for %s' % self.__class__.__name__)
++            removed_entries = self._cleanup()
++            self.debug('Cleaned up %i entries for %s' %
++                       (removed_entries, self.__class__.__name__))
++            self.save_options('dbinfo', '%s_last_clean'
++                              % self.__class__.__name__,
++                              {'timestamp': int(time.time()),
++                               'removed_entries': removed_entries})
++
++    def _cleanup(self):
++        # The default cleanup is to do nothing
++        # This function should return the number of rows it cleaned up.
++        # This information may be used to automatically tune the clean period.
++        self.error('Cleanup for %s not implemented' %
++                   self.__class__.__name__)
++        return 0
+ 
+     def _upgrade_database(self):
+         if self.is_readonly:
+@@ -488,6 +550,7 @@ class Store(Log):
+ 
+ 
+ class AdminStore(Store):
++    _should_cleanup = False
+ 
+     def __init__(self):
+         super(AdminStore, self).__init__('admin.config.db')
+@@ -512,6 +575,7 @@ class AdminStore(Store):
+ 
+ 
+ class UserStore(Store):
++    _should_cleanup = False
+ 
+     def __init__(self, path=None):
+         super(UserStore, self).__init__('user.prefs.db')
+@@ -534,6 +598,17 @@ class TranStore(Store):
+     def __init__(self, path=None):
+         super(TranStore, self).__init__('transactions.db')
+ 
++    def _cleanup(self):
++        # pylint: disable=protected-access
++        table = SqlQuery(self._db, 'transactions', UNIQUE_DATA_TABLE)._table
++        in_one_hour = datetime.datetime.now() - datetime.timedelta(hours=1)
++        sel = select([table.columns.uuid]). \
++            where(and_(table.c.name == 'origintime',
++                       table.c.value <= in_one_hour))
++        # pylint: disable=no-value-for-parameter
++        d = table.delete().where(table.c.uuid.in_(sel))
++        return d.execute().rowcount
++
+ 
+ class SAML2SessionStore(Store):
+ 
+@@ -560,7 +635,7 @@ class SAML2SessionStore(Store):
+             raise ValueError("Multiple entries returned")
+         return data.keys()[0]
+ 
+-    def remove_expired_sessions(self):
++    def _cleanup(self):
+         # pylint: disable=protected-access
+         table = SqlQuery(self._db, self.table, UNIQUE_DATA_TABLE)._table
+         sel = select([table.columns.uuid]). \
+@@ -568,7 +643,7 @@ class SAML2SessionStore(Store):
+                        table.c.value <= datetime.datetime.now()))
+         # pylint: disable=no-value-for-parameter
+         d = table.delete().where(table.c.uuid.in_(sel))
+-        d.execute()
++        return d.execute().rowcount
+ 
+     def get_data(self, idval=None, name=None, value=None):
+         return self.get_unique_data(self.table, idval, name, value)
+diff --git a/ipsilon/util/sessions.py b/ipsilon/util/sessions.py
+index 1b91982..8d059e0 100644
+--- a/ipsilon/util/sessions.py
++++ b/ipsilon/util/sessions.py
+@@ -4,6 +4,7 @@ import base64
+ from cherrypy.lib.sessions import Session
+ from ipsilon.util.data import SqlStore, SqlQuery
+ import threading
++import datetime
+ try:
+     import cPickle as pickle
+ except ImportError:
+@@ -63,6 +64,14 @@ class SqlSession(Session):
+         q = SqlQuery(self._db, 'sessions', SESSION_TABLE)
+         q.delete({'id': self.id})
+ 
++    def _cleanup(self):
++        # pylint: disable=protected-access
++        table = SqlQuery(self._db, 'sessions', SESSION_TABLE)._table
++        # pylint: disable=no-value-for-parameter
++        d = table.delete().where(table.c.expiration_time
++                                 <= datetime.datetime.now())
++        return d.execute().rowcount
++
+     # copy what RamSession does for now
+     def acquire_lock(self):
+         """Acquire an exclusive lock on the currently-loaded session data."""
+diff --git a/templates/install/ipsilon.conf b/templates/install/ipsilon.conf
+index b57aa55..7b1adee 100644
+--- a/templates/install/ipsilon.conf
++++ b/templates/install/ipsilon.conf
+@@ -2,6 +2,7 @@
+ debug = ${debugging}
+ tools.log_request_response.on = False
+ template_dir = "templates"
++cleanup_interval = ${cleanup_interval}
+ db.conn.log = False
+ 
+ log.screen = ${debugging}
+-- 
+2.4.3
+

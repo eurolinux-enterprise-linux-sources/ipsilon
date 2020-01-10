@@ -1,0 +1,36 @@
+<From 5884648c7fda363c587fda97b341cdb77ee97399 Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Aug 06 2015 15:12:16 +0000
+Subject: Use full path when constructing "Other authentication methods"
+
+
+It was previously providing just a relative path and if the paths
+overlapped I guess the browser was trying to smash them together.
+
+This would result in a double "gssapi" in the gssapi URL like:
+
+https://my.ipsilon.org/idp/login/gssapi/gssapi/negotiate?ips...
+
+Don't rely on the browser to get the path right, use self.basepath.
+
+https://fedorahosted.org/ipsilon/ticket/153
+
+---
+
+diff --git a/ipsilon/login/common.py b/ipsilon/login/common.py
+index 31053a0..cd4f166 100644
+--- a/ipsilon/login/common.py
++++ b/ipsilon/login/common.py
+@@ -184,7 +184,9 @@ class LoginFormBase(LoginPageBase):
+         if other_login_stacks:
+             other_stacks = list()
+             for ls in other_login_stacks:
+-                url = '%s?%s' % (ls.path, self.trans.get_GET_arg())
++                url = '%s/login/%s?%s' % (
++                    self.basepath, ls.path, self.trans.get_GET_arg()
++                )
+                 name = ls.name
+                 other_stacks.append({'url': url, 'name': name})
+ 
+
+

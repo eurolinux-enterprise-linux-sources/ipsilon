@@ -1,0 +1,30 @@
+From e64e186a79dfe5fcb6dfa8ad651252acc8f1e056 Mon Sep 17 00:00:00 2001
+From: Patrick Uiterwijk <puiterwijk@redhat.com>
+Date: Tue, 8 Sep 2015 04:06:16 +0200
+Subject: [PATCH 2/3] Backport of patch
+ 3b079b3735ea98b3b36b22b0f0353cb56f023dad
+
+Signed-off-by: Patrick Uiterwijk <puiterwijk@redhat.com>
+---
+ ipsilon/install/ipsilon-client-install | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/ipsilon/install/ipsilon-client-install b/ipsilon/install/ipsilon-client-install
+index 78dfb51..3829ece 100755
+--- a/ipsilon/install/ipsilon-client-install
++++ b/ipsilon/install/ipsilon-client-install
+@@ -369,6 +369,11 @@ def parse_args():
+     if not args['saml_sp'].startswith(args['saml_base']):
+         raise ValueError('--saml-sp must be a subpath of --saml-base.')
+ 
++    # The samle_auth setting must be a subpath of saml_base otherwise
++    # the IdP cannot be identified by mod_auth_mellon.
++    if not args['saml_auth'].startswith(args['saml_base']):
++        raise ValueError('--saml-auth must be a subpath of --saml-base.')
++
+     # The saml_sp_logout and saml_sp_post settings must be subpaths
+     # of saml_sp (the mellon endpoint).
+     path_args = ['saml_sp_logout', 'saml_sp_post']
+-- 
+2.4.3
+

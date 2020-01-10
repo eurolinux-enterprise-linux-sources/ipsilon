@@ -1,0 +1,80 @@
+#!/usr/bin/python
+#
+# Copyright (C) 2013 Ipsilon project Contributors, for license see COPYING
+
+import sys
+sys.stdout = sys.stderr
+import glob
+import os
+import atexit
+import cherrypy
+from ipsilon.util.data import AdminStore
+from ipsilon.util import page
+from ipsilon.root import Root
+from jinja2 import Environment, FileSystemLoader, ChoiceLoader
+import ipsilon.util.sessions
+
+
+def nuke_session_locks():
+    if cherrypy.config['tools.sessions.on']:
+        try:
+            sessdir = cherrypy.config['tools.sessions.storage_path']
+            for l in glob.glob(os.path.join(sessdir, '*.lock')):
+                try:
+                    os.remove(l)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+cfgfile = None
+if (len(sys.argv) > 1):
+    cfgfile = sys.argv[-1]
+elif os.path.isfile('ipsilon.conf'):
+    cfgfile = 'ipsilon.conf'
+elif os.path.isfile('/etc/ipsilon/ipsilon.conf'):
+    cfgfile = '/etc/ipsilon/ipsilon.conf'
+else:
+    raise IOError("Configuration file not found")
+
+cherrypy.lib.sessions.SqlSession = ipsilon.util.sessions.SqlSession
+cherrypy.config.update(cfgfile)
+
+nuke_session_locks()
+
+datastore = AdminStore()
+admin_config = datastore.load_config()
+for option in admin_config:
+    cherrypy.config[option] = admin_config[option]
+
+template_loaders = []
+default_template_dir = 'templates'
+template_dir = cherrypy.config.get('template_dir', default_template_dir)
+if template_dir.startswith('/'):
+    template_loaders.append(FileSystemLoader(template_dir))
+else:
+    template_loaders.append(FileSystemLoader(
+        os.path.join(cherrypy.config['base.dir'],
+                     template_dir)))
+# Fall-back to the default templates
+template_loaders.append(FileSystemLoader(
+    os.path.join(cherrypy.config['base.dir'],
+                 default_template_dir)))
+template_env = Environment(loader=ChoiceLoader(template_loaders))
+
+if __name__ == "__main__":
+    conf = {'/': {'tools.staticdir.root': os.getcwd()},
+            '/ui': {'tools.staticdir.on': True,
+                    'tools.staticdir.dir': 'ui'}}
+    cherrypy.quickstart(Root('default', template_env),
+                        cherrypy.config['base.mount'], conf)
+
+else:
+    cherrypy.config['environment'] = 'embedded'
+
+    if cherrypy.__version__.startswith('3.0') and cherrypy.engine.state == 0:
+        cherrypy.engine.start(blocking=False)
+        atexit.register(cherrypy.engine.stop)
+
+    application = cherrypy.Application(Root('default', template_env),
+                                       script_name=None, config=None)

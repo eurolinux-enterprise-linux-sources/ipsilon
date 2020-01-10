@@ -1,0 +1,34 @@
+From 715fa96eb2f97451749d3e66b801bdefe861b16e Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Mon, 24 Aug 2015 18:27:35 +0000
+Subject: [PATCH 01/13] Count IPA as a login plugin when checking for enabled
+ plugins
+
+The installer ensures that at least one login plugin is enabled.
+It didn't consider IPA, which automatically enables gssapi,
+when doing this calculation. Add a check so that IPA counts as well.
+
+https://fedorahosted.org/ipsilon/ticket/152
+
+Signed-off-by: Rob Crittenden <rcritten@redhat.com>
+Reviewed-by: Patrick Uiterwijk <puiterwijk@redhat.com>
+---
+ ipsilon/install/ipsilon-server-install | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ipsilon/install/ipsilon-server-install b/ipsilon/install/ipsilon-server-install
+index 80bd274..2c16a03 100755
+--- a/ipsilon/install/ipsilon-server-install
++++ b/ipsilon/install/ipsilon-server-install
+@@ -405,7 +405,7 @@ def parse_args(plugins):
+     else:
+         args['lm_order'] = args['lm_order'].split(',')
+ 
+-    if len(args['lm_order']) == 0:
++    if len(args['lm_order']) == 0 and args['ipa'] != 'yes':
+         sys.exit('No login plugins are enabled.')
+ 
+     #FIXME: check instance is only alphanums
+-- 
+2.4.3
+

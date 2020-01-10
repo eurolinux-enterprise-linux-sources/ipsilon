@@ -1,0 +1,33 @@
+From ea3a3c63719961c66b7b45cd7cfee51cf4bd5f6d Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Mon, 24 Aug 2015 17:42:19 +0000
+Subject: [PATCH 01/12] Log a message when authentication is successful but
+ doesn't
+
+match the NameID required by the SAML request.
+
+https://fedorahosted.org/ipsilon/ticket/157
+
+Signed-off-by: Rob Crittenden <rcritten@redhat.com>
+Reviewed-by: Patrick Uiterwijk <puiterwijk@redhat.com>
+Signed-off-by: Patrick Uiterwijk <puiterwijk@redhat.com>
+---
+ ipsilon/providers/saml2/auth.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/ipsilon/providers/saml2/auth.py b/ipsilon/providers/saml2/auth.py
+index d856220..5412240 100644
+--- a/ipsilon/providers/saml2/auth.py
++++ b/ipsilon/providers/saml2/auth.py
+@@ -211,6 +211,8 @@ class AuthenticateRequest(ProviderPageBase):
+             login.assertion.subject.nameId.content = nameid
+         else:
+             self.trans.wipe()
++            self.error('Authentication succeeded but it was not ' +
++                       'provided by NameID %s' % nameidfmt)
+             raise AuthenticationError("Unavailable Name ID type",
+                                       lasso.SAML2_STATUS_CODE_AUTHN_FAILED)
+ 
+-- 
+2.4.3
+

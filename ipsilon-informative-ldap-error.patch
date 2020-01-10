@@ -1,0 +1,60 @@
+diff -rup ipsilon-1.0.0.orig/ipsilon/login/authform.py ipsilon-1.0.0/ipsilon/login/authform.py
+--- ipsilon-1.0.0.orig/ipsilon/login/authform.py	2015-05-12 00:19:04.000000000 +0200
++++ ipsilon-1.0.0/ipsilon/login/authform.py	2015-07-27 20:49:48.708017026 +0200
+@@ -9,6 +9,15 @@ from string import Template
+ import cherrypy
+ import subprocess
+ 
++# Translate PAM errors into more human-digestible values and eventually
++# other languages.
++PAM_AUTH_ERRORS = {
++    "Authentication token is no longer valid; new one required":
++        "Password is expired",
++    "Authentication failure":
++        "Authentication failure",
++}
++
+ 
+ class Form(LoginFormBase):
+ 
+@@ -19,12 +28,13 @@ class Form(LoginFormBase):
+         if not user.is_anonymous:
+             return self.lm.auth_successful(self.trans, user.name, 'password')
+         else:
+-            try:
+-                error = cherrypy.request.headers['EXTERNAL_AUTH_ERROR']
+-            except KeyError:
+-                error = "Unknown error using external authentication"
+-                cherrypy.log.error("Error: %s" % error)
+-            return self.lm.auth_failed(self.trans)
++            error = cherrypy.request.wsgi_environ.get(
++                'EXTERNAL_AUTH_ERROR',
++                'Unknown error using external authentication'
++            )
++            error = PAM_AUTH_ERRORS.get(error, error)
++            cherrypy.log.error("Error: %s" % error)
++            return self.lm.auth_failed(self.trans, error)
+ 
+ 
+ class LoginManager(LoginManagerBase):
+diff -rup ipsilon-1.0.0.orig/ipsilon/login/common.py ipsilon-1.0.0/ipsilon/login/common.py
+--- ipsilon-1.0.0.orig/ipsilon/login/common.py	2015-05-12 00:19:04.000000000 +0200
++++ ipsilon-1.0.0/ipsilon/login/common.py	2015-07-27 20:50:31.741146282 +0200
+@@ -85,7 +85,7 @@ class LoginManagerBase(ConfigHelper, Plu
+             trans.wipe()
+         raise cherrypy.HTTPRedirect(redirect)
+ 
+-    def auth_failed(self, trans):
++    def auth_failed(self, trans, message=None):
+         # try with next module
+         next_login = self.next_login()
+         if next_login:
+@@ -104,7 +104,7 @@ class LoginManagerBase(ConfigHelper, Plu
+         # destroy session and return error
+         if 'login_return' not in transdata:
+             session.logout(None)
+-            raise cherrypy.HTTPError(401)
++            raise cherrypy.HTTPError(401, message)
+ 
+         raise cherrypy.HTTPRedirect(transdata['login_return'])
+ 

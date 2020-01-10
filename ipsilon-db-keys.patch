@@ -1,0 +1,231 @@
+From 06694133d3b2968cddc221c4ea9f95504a5a35c1 Mon Sep 17 00:00:00 2001
+From: Patrick Uiterwijk <puiterwijk@redhat.com>
+Date: Tue, 8 Sep 2015 04:03:05 +0200
+Subject: [PATCH 1/3] Backport of DB patch
+ 61de77fc7eae1f844944bd692d13bf27a1fda6fe
+
+Signed-off-by: Patrick Uiterwijk <puiterwijk@redhat.com>
+---
+ ipsilon/util/data.py     | 65 ++++++++++++++++++++++++++++++++----------------
+ ipsilon/util/sessions.py | 13 ++++++----
+ 2 files changed, 52 insertions(+), 26 deletions(-)
+
+diff --git a/ipsilon/util/data.py b/ipsilon/util/data.py
+index 53a1756..737e597 100644
+--- a/ipsilon/util/data.py
++++ b/ipsilon/util/data.py
+@@ -6,6 +6,7 @@ from ipsilon.util.log import Log
+ from sqlalchemy import create_engine
+ from sqlalchemy import MetaData, Table, Column, Text
+ from sqlalchemy.pool import QueuePool, SingletonThreadPool
++from sqlalchemy.schema import PrimaryKeyConstraint, Index
+ from sqlalchemy.sql import select, and_
+ import ConfigParser
+ import os
+@@ -13,9 +14,15 @@ import uuid
+ import logging
+ 
+ 
+-CURRENT_SCHEMA_VERSION = 1
+-OPTIONS_COLUMNS = ['name', 'option', 'value']
+-UNIQUE_DATA_COLUMNS = ['uuid', 'name', 'value']
++CURRENT_SCHEMA_VERSION = 2
++OPTIONS_TABLE = {'columns': ['name', 'option', 'value'],
++                 'primary_key': ('name', 'option'),
++                 'indexes': [('name',)]
++                 }
++UNIQUE_DATA_TABLE = {'columns': ['uuid', 'name', 'value'],
++                     'primary_key': ('uuid', 'name'),
++                     'indexes': [('uuid',)]
++                     }
+ 
+ 
+ class SqlStore(Log):
+@@ -77,16 +84,27 @@ def SqlAutotable(f):
+ 
+ class SqlQuery(Log):
+ 
+-    def __init__(self, db_obj, table, columns, trans=True):
++    def __init__(self, db_obj, table, table_def, trans=True):
+         self._db = db_obj
+         self._con = self._db.connection()
+         self._trans = self._con.begin() if trans else None
+-        self._table = self._get_table(table, columns)
+-
+-    def _get_table(self, name, columns):
+-        table = Table(name, MetaData(self._db.engine()))
+-        for c in columns:
+-            table.append_column(Column(c, Text()))
++        self._table = self._get_table(table, table_def)
++
++    def _get_table(self, name, table_def):
++        if isinstance(table_def, list):
++            table_def = {'columns': table_def,
++                         'indexes': [],
++                         'primary_key': None}
++        table_creation = []
++        for col_name in table_def['columns']:
++            table_creation.append(Column(col_name, Text()))
++        if table_def['primary_key']:
++            table_creation.append(PrimaryKeyConstraint(
++                *table_def['primary_key']))
++        for index in table_def['indexes']:
++            idx_name = 'idx_%s_%s' % (name, '_'.join(index))
++            table_creation.append(Index(idx_name, *index))
++        table = Table(name, MetaData(self._db.engine()), *table_creation)
+         return table
+ 
+     def _where(self, kvfilter):
+@@ -166,7 +184,12 @@ class FileStore(Log):
+ 
+ class FileQuery(Log):
+ 
+-    def __init__(self, fstore, table, columns, trans=True):
++    def __init__(self, fstore, table, table_def, trans=True):
++        # We don't need indexes in a FileQuery, so drop that info
++        if isinstance(table_def, dict):
++            columns = table_def['columns']
++        else:
++            columns = table_def
+         self._fstore = fstore
+         self._config = fstore.get_config()
+         self._section = table
+@@ -343,7 +366,7 @@ class Store(Log):
+         kvfilter = dict()
+         if name:
+             kvfilter['name'] = name
+-        options = self._load_data(table, OPTIONS_COLUMNS, kvfilter)
++        options = self._load_data(table, OPTIONS_TABLE, kvfilter)
+         if name and name in options:
+             return options[name]
+         return options
+@@ -352,7 +375,7 @@ class Store(Log):
+         curvals = dict()
+         q = None
+         try:
+-            q = self._query(self._db, table, OPTIONS_COLUMNS)
++            q = self._query(self._db, table, OPTIONS_TABLE)
+             rows = q.select({'name': name}, ['option', 'value'])
+             for row in rows:
+                 curvals[row[0]] = row[1]
+@@ -375,7 +398,7 @@ class Store(Log):
+         kvfilter = {'name': name}
+         q = None
+         try:
+-            q = self._query(self._db, table, OPTIONS_COLUMNS)
++            q = self._query(self._db, table, OPTIONS_TABLE)
+             if options is None:
+                 q.delete(kvfilter)
+             else:
+@@ -393,7 +416,7 @@ class Store(Log):
+         newid = str(uuid.uuid4())
+         q = None
+         try:
+-            q = self._query(self._db, table, UNIQUE_DATA_COLUMNS)
++            q = self._query(self._db, table, UNIQUE_DATA_TABLE)
+             for name in data:
+                 q.insert((newid, name, data[name]))
+             q.commit()
+@@ -412,12 +435,12 @@ class Store(Log):
+             kvfilter['name'] = name
+         if value:
+             kvfilter['value'] = value
+-        return self._load_data(table, UNIQUE_DATA_COLUMNS, kvfilter)
++        return self._load_data(table, UNIQUE_DATA_TABLE, kvfilter)
+ 
+     def save_unique_data(self, table, data):
+         q = None
+         try:
+-            q = self._query(self._db, table, UNIQUE_DATA_COLUMNS)
++            q = self._query(self._db, table, UNIQUE_DATA_TABLE)
+             for uid in data:
+                 curvals = dict()
+                 rows = q.select({'uuid': uid}, ['name', 'value'])
+@@ -446,7 +469,7 @@ class Store(Log):
+     def del_unique_data(self, table, uuidval):
+         kvfilter = {'uuid': uuidval}
+         try:
+-            q = self._query(self._db, table, UNIQUE_DATA_COLUMNS, trans=False)
++            q = self._query(self._db, table, UNIQUE_DATA_TABLE, trans=False)
+             q.delete(kvfilter)
+         except Exception, e:  # pylint: disable=broad-except
+             self.error("Failed to delete data from %s: [%s]" % (table, e))
+@@ -454,7 +477,7 @@ class Store(Log):
+     def _reset_data(self, table):
+         q = None
+         try:
+-            q = self._query(self._db, table, UNIQUE_DATA_COLUMNS)
++            q = self._query(self._db, table, UNIQUE_DATA_TABLE)
+             q.drop()
+             q.create()
+             q.commit()
+@@ -518,7 +541,7 @@ class SAML2SessionStore(Store):
+         super(SAML2SessionStore, self).__init__(database_url=database_url)
+         self.table = 'sessions'
+         # pylint: disable=protected-access
+-        table = SqlQuery(self._db, self.table, UNIQUE_DATA_COLUMNS)._table
++        table = SqlQuery(self._db, self.table, UNIQUE_DATA_TABLE)._table
+         table.create(checkfirst=True)
+ 
+     def _get_unique_id_from_column(self, name, value):
+@@ -539,7 +562,7 @@ class SAML2SessionStore(Store):
+ 
+     def remove_expired_sessions(self):
+         # pylint: disable=protected-access
+-        table = SqlQuery(self._db, self.table, UNIQUE_DATA_COLUMNS)._table
++        table = SqlQuery(self._db, self.table, UNIQUE_DATA_TABLE)._table
+         sel = select([table.columns.uuid]). \
+             where(and_(table.c.name == 'expiration_time',
+                        table.c.value <= datetime.datetime.now()))
+diff --git a/ipsilon/util/sessions.py b/ipsilon/util/sessions.py
+index f5390dc..1b91982 100644
+--- a/ipsilon/util/sessions.py
++++ b/ipsilon/util/sessions.py
+@@ -10,7 +10,10 @@ except ImportError:
+     import pickle
+ 
+ 
+-SESSION_COLUMNS = ['id', 'data', 'expiration_time']
++SESSION_TABLE = {'columns': ['id', 'data', 'expiration_time'],
++                 'primary_key': ('id', ),
++                 'indexes': [('expiration_time',)]
++                 }
+ 
+ 
+ class SqlSession(Session):
+@@ -31,12 +34,12 @@ class SqlSession(Session):
+         cls._db = SqlStore(cls.dburi)
+ 
+     def _exists(self):
+-        q = SqlQuery(self._db, 'sessions', SESSION_COLUMNS)
++        q = SqlQuery(self._db, 'sessions', SESSION_TABLE)
+         result = q.select({'id': self.id})
+         return True if result.fetchone() else False
+ 
+     def _load(self):
+-        q = SqlQuery(self._db, 'sessions', SESSION_COLUMNS)
++        q = SqlQuery(self._db, 'sessions', SESSION_TABLE)
+         result = q.select({'id': self.id})
+         r = result.fetchone()
+         if r:
+@@ -46,7 +49,7 @@ class SqlSession(Session):
+     def _save(self, expiration_time):
+         q = None
+         try:
+-            q = SqlQuery(self._db, 'sessions', SESSION_COLUMNS, trans=True)
++            q = SqlQuery(self._db, 'sessions', SESSION_TABLE, trans=True)
+             q.delete({'id': self.id})
+             data = pickle.dumps((self._data, expiration_time), self._proto)
+             q.insert((self.id, base64.b64encode(data), expiration_time))
+@@ -57,7 +60,7 @@ class SqlSession(Session):
+             raise
+ 
+     def _delete(self):
+-        q = SqlQuery(self._db, 'sessions', SESSION_COLUMNS)
++        q = SqlQuery(self._db, 'sessions', SESSION_TABLE)
+         q.delete({'id': self.id})
+ 
+     # copy what RamSession does for now
+-- 
+2.4.3
+
